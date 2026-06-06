@@ -1,0 +1,82 @@
+name: Build and Publish CoreProtect v23.2
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: Repository to build
+        required: true
+        default: PlayPro/CoreProtect
+      source_ref:
+        description: Git ref to build
+        required: true
+        default: v23.2
+      release_tag:
+        description: Release tag to publish the built jar to
+        required: true
+        default: v23.2
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.release.tag_name == 'v23.2'
+    name: Build v23.2 and publish release asset
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPOSITORY: ${{ github.event.inputs.source_repository || 'PlayPro/CoreProtect' }}
+      SOURCE_REF: ${{ github.event.inputs.source_ref || 'v23.2' }}
+      RELEASE_TAG: ${{ github.event.inputs.release_tag || github.event.release.tag_name || 'v23.2' }}
+    steps:
+      - name: Check out CoreProtect source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          path: CoreProtect-v23.2
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: CoreProtect-v23.2/pom.xml
+
+      - name: Build with Maven
+        working-directory: CoreProtect-v23.2
+        run: mvn -B package
+
+      - name: Prepare release asset
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t jars < <(find CoreProtect-v23.2/target -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' ! -name 'original-*.jar' | sort)
+          if [ "${#jars[@]}" -ne 1 ]; then
+            printf 'Expected exactly one jar, found %s:\n' "${#jars[@]}" >&2
+            printf ' - %s\n' "${jars[@]}" >&2
+            exit 1
+          fi
+          asset_name="CoreProtect-${SOURCE_REF#v}.jar"
+          cp "${jars[0]}" "$asset_name"
+          echo "path=$asset_name" >> "$GITHUB_OUTPUT"
+          echo "name=$asset_name" >> "$GITHUB_OUTPUT"
+
+      - name: Create release if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "$RELEASE_TAG" --notes "Built from ${SOURCE_REPOSITORY}@${SOURCE_REF}."
+          fi
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" "${{ steps.asset.outputs.path }}#${{ steps.asset.outputs.name }}" --repo "$GITHUB_REPOSITORY" --clobber
